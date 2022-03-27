@@ -28,9 +28,7 @@ public class Communicator {
 
     private final Map<String, Listener<Optional<byte[]>>> replyListenerMap = new ConcurrentHashMap<>();
 
-    private final Queue<Pair<String,List<byte[]>>> pendingTaskQueue = new ConcurrentLinkedQueue<>();
-
-    private final Queue<Pair<String,Optional<byte[]>>> completedTaskQueue = new ConcurrentLinkedQueue<>();
+    private final Queue<Pair<String, Optional<byte[]>>> completedTaskQueue = new ConcurrentLinkedQueue<>();
 
     private final Map<String, Map<String, List<byte[]>>> sentTaskMap = new HashMap<>();
 
@@ -40,9 +38,9 @@ public class Communicator {
 
     private final Map<String, ZMQ.Socket> socketMap = new HashMap<>();
 
-    private ZMQ.Socket receiver = null;
+    private final List<ZMQ.Socket> receivers = new ArrayList<>();
 
-    private Listener<Pair<String, List<byte[]>>> serviceListener  = null;
+    private Listener<Pair<String, List<byte[]>>> serviceListener = null;
 
     private final ZContext context;
 
@@ -52,14 +50,16 @@ public class Communicator {
         socketMap.put(taskId, requester);
     }
 
-    public void registerReceiver(String bindAddress, Listener<Pair<String, List<byte[]>>> serviceListener) {
-        ZMQ.Socket receiveSocket = context.createSocket(SocketType.ROUTER);
-        receiveSocket.bind(bindAddress);
-        receiver = receiveSocket;
+    public void registerReceiver(List<String> bindAddresses, Listener<Pair<String, List<byte[]>>> serviceListener) {
+        for (String bindAddress : bindAddresses) {
+            ZMQ.Socket receiveSocket = context.createSocket(SocketType.ROUTER);
+            receiveSocket.bind(bindAddress);
+            receivers.add(receiveSocket);
+        }
         this.serviceListener = serviceListener;
     }
 
-    public Communicator(ThreadHandler threadHandler) {
+    public Communicator(ThreadHandler threadHandler, boolean isIndependentServer) {
 
         this.context = new ZContext();
 
@@ -67,86 +67,96 @@ public class Communicator {
 
             while (!Thread.currentThread().isInterrupted()) {
 
-                Timestamp comInitiateTimeStamp = new Timestamp(System.currentTimeMillis());
+                try {
+                    Timestamp comInitiateTimeStamp = new Timestamp(System.currentTimeMillis());
 
-                int requestTaskQueueSize = concurrentTaskQueue.size();
+                    int requestTaskQueueSize = concurrentTaskQueue.size();
 
-                for (int i = 0; i < requestTaskQueueSize; i++) {
+                    for (int i = 0; i < requestTaskQueueSize; i++) {
 
-                    Pair<String, Pair<String, List<byte[]>>> serializedArrayWithIdentity = concurrentTaskQueue.poll();
-                    // this can't be null due to the above implementation
-                    String taskId = serializedArrayWithIdentity.getFirstElement();
-                    Pair<String, List<byte[]>> requestPair = serializedArrayWithIdentity.getSecondElement();
-                    String requestTokenId = requestPair.getFirstElement();
-                    List<byte[]> serializedArrays = requestPair.getSecondElement();
-
-                    sentTaskMap.putIfAbsent(taskId, new HashMap<>());
-                    sentTaskMap.get(taskId).put(requestTokenId, serializedArrays);
-
-                    ZMsg outMsg = new ZMsg();
-                    outMsg.add(requestTokenId);
-                    for (byte[] serializedArray : serializedArrays) {
-                        outMsg.add(new ZFrame(serializedArray));
-                    }
-                    outMsg.send(socketMap.get(taskId));
-                }
-                socketMap.forEach((key, value) -> {
-                    ZMsg inMsg = ZMsg.recvMsg(value, false);
-                    String responseTokenId = inMsg.pop().getString(StandardCharsets.UTF_8);
-                    if(inMsg.size() > 0){
-                        byte[] response = inMsg.pop().getData();
-                        replyListenerMap.remove(responseTokenId).listen(Optional.of(response));
-                    } else {
-                        replyListenerMap.remove(responseTokenId).listen(Optional.empty());
-                    }
-                    sentTaskMap.get(key).remove(responseTokenId);
-
-                });
-
-
-                if(receiver != null){
-                    for(int receiveCount = 0; receiveCount<10; receiveCount++){
-                        ZMsg inMsg = ZMsg.recvMsg(receiver, false);
-                        byte[] callerId = inMsg.pop().getData();
-                        String clientTokenId = inMsg.pop().getString(StandardCharsets.UTF_8);
-                        List<byte[]> requestArgs = new ArrayList<>();
-                        while(inMsg.size() > 0){
-                            requestArgs.add(inMsg.pop().getData());
-                        }
-                        serviceListener.listen(new Pair<>(clientTokenId,requestArgs));
-                        pendingTaskMap.put(clientTokenId,callerId);
-                    }
-
-                    int completedTaskQueueSize = completedTaskQueue.size();
-
-                    for (int i = 0; i < completedTaskQueueSize; i++) {
-
-                        Pair<String,Optional<byte[]>> serializedArrayWithIdentity = completedTaskQueue.poll();
+                        Pair<String, Pair<String, List<byte[]>>> serializedArrayWithIdentity = concurrentTaskQueue.poll();
                         // this can't be null due to the above implementation
-                        String clientTokenId = serializedArrayWithIdentity.getFirstElement();
+                        String taskId = serializedArrayWithIdentity.getFirstElement();
+                        Pair<String, List<byte[]>> requestPair = serializedArrayWithIdentity.getSecondElement();
+                        String requestTokenId = requestPair.getFirstElement();
+                        List<byte[]> serializedArrays = requestPair.getSecondElement();
+
+                        sentTaskMap.putIfAbsent(taskId, new HashMap<>());
+                        sentTaskMap.get(taskId).put(requestTokenId, serializedArrays);
+
                         ZMsg outMsg = new ZMsg();
-                        outMsg.add(pendingTaskMap.get(clientTokenId));
-                        outMsg.add(clientTokenId);
-                        if(serializedArrayWithIdentity.getSecondElement().isPresent()){
-                            outMsg.add(serializedArrayWithIdentity.getSecondElement().get());
+                        outMsg.add(requestTokenId);
+                        for (byte[] serializedArray : serializedArrays) {
+                            outMsg.add(new ZFrame(serializedArray));
                         }
-                        outMsg.send(receiver);
-                        pendingTaskMap.remove(clientTokenId);
-                    };
+                        outMsg.send(socketMap.get(taskId));
+                    }
+                    socketMap.forEach((key, value) -> {
+                        ZMsg inMsg = ZMsg.recvMsg(value, false);
+                        if (inMsg != null) {
+                            String responseTokenId = inMsg.pop().getString(StandardCharsets.UTF_8);
+                            if (inMsg.size() > 0) {
+                                byte[] response = inMsg.pop().getData();
+                                replyListenerMap.remove(responseTokenId).listen(Optional.of(response));
+                            } else {
+                                replyListenerMap.remove(responseTokenId).listen(Optional.empty());
+                            }
+                            sentTaskMap.get(key).remove(responseTokenId);
+                        }
+                    });
 
+
+                    receivers.forEach(receiver -> {
+                        for (int receiveCount = 0; receiveCount < 10; receiveCount++) {
+                            ZMsg inMsg = ZMsg.recvMsg(receiver, false);
+                            if (inMsg != null) {
+                                byte[] callerId = inMsg.pop().getData();
+                                String clientTokenId = inMsg.pop().getString(StandardCharsets.UTF_8);
+                                List<byte[]> requestArgs = new ArrayList<>();
+                                while (inMsg.size() > 0) {
+                                    requestArgs.add(inMsg.pop().getData());
+                                }
+                                serviceListener.listen(new Pair<>(clientTokenId, requestArgs));
+                                pendingTaskMap.put(clientTokenId, callerId);
+                            }
+                        }
+
+                        int completedTaskQueueSize = completedTaskQueue.size();
+
+                        for (int i = 0; i < completedTaskQueueSize; i++) {
+
+                            Pair<String, Optional<byte[]>> serializedArrayWithIdentity = completedTaskQueue.poll();
+                            // this can't be null due to the above implementation
+                            String clientTokenId = serializedArrayWithIdentity.getFirstElement();
+                            ZMsg outMsg = new ZMsg();
+                            outMsg.add(pendingTaskMap.get(clientTokenId));
+                            outMsg.add(clientTokenId);
+                            if (serializedArrayWithIdentity.getSecondElement().isPresent()) {
+                                outMsg.add(serializedArrayWithIdentity.getSecondElement().get());
+                            }
+                            outMsg.send(receiver);
+                            pendingTaskMap.remove(clientTokenId);
+                        }
+                        ;
+
+                    });
+
+                    Timestamp comCompletedTimeStamp = new Timestamp(System.currentTimeMillis());
+
+                    long elapsedTime = comCompletedTimeStamp.getTime() - comInitiateTimeStamp.getTime();
+
+                    if (elapsedTime < COMMUNICATOR_DELAY) {
+                        Thread.sleep(COMMUNICATOR_DELAY - elapsedTime);
+                    }
+                } catch (Exception e) {
+                    e.printStackTrace();
+                    throw new RuntimeException(e);
                 }
 
-                Timestamp comCompletedTimeStamp = new Timestamp(System.currentTimeMillis());
-
-                long elapsedTime = comCompletedTimeStamp.getTime() - comInitiateTimeStamp.getTime();
-
-                if (elapsedTime < COMMUNICATOR_DELAY) {
-                    Thread.sleep(COMMUNICATOR_DELAY - elapsedTime);
-                }
             }
         };
 
-        threadHandler.initiateTaskRoutine(true, asyncFunction);
+        threadHandler.initiateTaskRoutine(!isIndependentServer, asyncFunction);
 
     }
 
@@ -156,15 +166,15 @@ public class Communicator {
 
 
     public void registerReplyListener(String tokenId, Listener<Optional<byte[]>> asyncFunction) {
-        replyListenerMap.put(tokenId,asyncFunction);
+        replyListenerMap.put(tokenId, asyncFunction);
     }
 
-    public void sendReply(String tokenId,byte[] serializedByteArray ){
-        completedTaskQueue.add(new Pair<>(tokenId,Optional.of(serializedByteArray)));
+    public void sendReply(String tokenId, byte[] serializedByteArray) {
+        completedTaskQueue.add(new Pair<>(tokenId, Optional.of(serializedByteArray)));
     }
 
-    public void sendReply(String tokenId ){
-        completedTaskQueue.add(new Pair<>(tokenId,Optional.empty()));
+    public void sendReply(String tokenId) {
+        completedTaskQueue.add(new Pair<>(tokenId, Optional.empty()));
     }
 
 }

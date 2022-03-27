@@ -1,0 +1,6 @@
+application: client
+services:
+  - service-signature: service-signature-2
+    locality: inter-process
+
+

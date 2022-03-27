@@ -18,6 +18,8 @@ public class FunctionMetaData {
 
     private boolean isVoid;
 
+    private boolean isReturnAsync = false;
+
     private Method returnParser;
 
     public FunctionMetaData(String functionSignature, ForeignServiceImpl foreignService,Method method){
@@ -47,9 +49,14 @@ public class FunctionMetaData {
         this.paramParseList.addAll(paramParseList);
     }
 
-    public void setReturnParser(Method returnParser){
+    public void setReturnParser(Method returnParser, boolean isAsync){
         this.isVoid = false;
         this.returnParser = returnParser;
+        this.isReturnAsync= isAsync;
+    }
+
+    public boolean isReturnAsync() {
+        return isReturnAsync;
     }
 
     public Method getReturnParser() {

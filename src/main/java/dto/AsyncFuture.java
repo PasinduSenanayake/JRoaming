@@ -1,5 +1,7 @@
 package dto;
 
+import model.TaskResponse;
+
 import java.lang.reflect.Method;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
@@ -41,7 +43,8 @@ public class AsyncFuture implements Future {
     @Override
     public Object get() throws InterruptedException, ExecutionException {
         try{
-            byte[] bytes =  (byte[]) this.completableFuture.get();
+            TaskResponse taskResponse = (TaskResponse)this.completableFuture.get();
+            byte[] bytes = taskResponse.getTaskResponseMessage();
             Object obj = parseFrom.invoke(null,bytes);
             return aClass.cast(obj);
         }catch (InterruptedException | ExecutionException e){
